@@ -1,96 +1,122 @@
-import os, logging, requests, re, tempfile
+import os, logging, requests, json
 from flask import Flask, request
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, CallbackQueryHandler
-from telegram.constants import ParseMode
 
 BOT_TOKEN = "8785333123:AAEzR0HtOs2lWw-rUqEofq2OZnmtO5qg23Q"
 CHANNEL_ID = -1004441957969
 
 app = Flask(__name__)
-bot_app = Application.builder().token(BOT_TOKEN).build()
-temp_files = {}
 logging.basicConfig(level=logging.INFO)
 
-# ---------- Check Join ----------
-async def is_user_joined(user_id):
+# ---------- Send Message ----------
+def send_message(chat_id, text, reply_markup=None):
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": chat_id,
+        "text": text,
+        "parse_mode": "Markdown"
+    }
+    if reply_markup:
+        payload["reply_markup"] = json.dumps(reply_markup)
     try:
-        member = await bot_app.bot.get_chat_member(chat_id=CHANNEL_ID, user_id=user_id)
-        return member.status in ["member", "administrator", "creator"]
-    except:
+        resp = requests.post(url, json=payload, timeout=10)
+        logging.info(f"Sent: {resp.status_code}")
+    except Exception as e:
+        logging.error(f"Send error: {e}")
+
+# ---------- Check Join ----------
+def is_user_joined(user_id):
+    try:
+        url = f"https://api.telegram.org/bot{BOT_TOKEN}/getChatMember"
+        params = {"chat_id": CHANNEL_ID, "user_id": user_id}
+        resp = requests.get(url, params=params, timeout=10)
+        if resp.status_code == 200:
+            data = resp.json()
+            if data.get("ok"):
+                status = data["result"]["status"]
+                return status in ["member", "administrator", "creator"]
         return False
-
-# ---------- /start ----------
-async def start(update, context):
-    keyboard = [
-        [InlineKeyboardButton("📢 Join Channel", url="https://t.me/terabotupdates")],
-        [InlineKeyboardButton("✅ Verify", callback_data="verify")]
-    ]
-    await update.message.reply_text(
-        "🙏 **Welcome! Join channel & press Verify.**",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode=ParseMode.MARKDOWN
-    )
-
-# ---------- Verify ----------
-async def verify(update, context):
-    query = update.callback_query
-    await query.answer()
-    user_id = query.from_user.id
-    if await is_user_joined(user_id):
-        await query.edit_message_text("✅ **Verified!** Send Terabox link.", parse_mode=ParseMode.MARKDOWN)
-    else:
-        await query.edit_message_text(
-            "❌ **Not joined.** Join & Verify again.",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("📢 Join", url="https://t.me/terabotupdates")],
-                [InlineKeyboardButton("✅ Verify", callback_data="verify")]
-            ]),
-            parse_mode=ParseMode.MARKDOWN
-        )
-
-# ---------- Handle Link ----------
-async def handle_link(update, context):
-    user_id = update.effective_user.id
-    if not await is_user_joined(user_id):
-        await update.message.reply_text("❌ Join channel first.")
-        return
-
-    link = update.message.text
-    if "terabox" not in link.lower():
-        await update.message.reply_text("❌ Send Terabox link.")
-        return
-
-    await update.message.reply_text("⏳ Processing... (Video download coming soon)")
+    except Exception as e:
+        logging.error(f"Join check error: {e}")
+        return False
 
 # ---------- Webhook ----------
 @app.route("/webhook", methods=["POST"])
 def webhook():
     try:
-        update = Update.de_json(request.get_json(force=True), bot_app.bot)
-        bot_app.process_update(update)
+        data = request.get_json(force=True)
+        logging.info(f"Webhook received: {data}")
+
+        # ---------- Message ----------
+        if "message" in data:
+            msg = data["message"]
+            chat_id = msg["chat"]["id"]
+            user_id = msg["from"]["id"]
+            text = msg.get("text", "")
+
+            if text == "/start":
+                keyboard = {
+                    "inline_keyboard": [
+                        [{"text": "📢 Join Channel", "url": "https://t.me/terabotupdates"}],
+                        [{"text": "✅ Verify", "callback_data": "verify"}]
+                    ]
+                }
+                send_message(chat_id, "🙏 **Welcome! Join channel & press Verify.**", keyboard)
+
+            elif "terabox" in text.lower():
+                if is_user_joined(user_id):
+                    send_message(chat_id, "⏳ Processing video... (Download feature soon)")
+                else:
+                    keyboard = {
+                        "inline_keyboard": [
+                            [{"text": "📢 Join Channel", "url": "https://t.me/terabotupdates"}],
+                            [{"text": "✅ Verify", "callback_data": "verify"}]
+                        ]
+                    }
+                    send_message(chat_id, "❌ Please join the channel first.", keyboard)
+            else:
+                send_message(chat_id, "❌ Send a valid Terabox link.")
+
+        # ---------- Callback Query ----------
+        elif "callback_query" in data:
+            query = data["callback_query"]
+            chat_id = query["message"]["chat"]["id"]
+            user_id = query["from"]["id"]
+
+            if query["data"] == "verify":
+                if is_user_joined(user_id):
+                    send_message(chat_id, "✅ **Verified!** Now send me a Terabox link.")
+                else:
+                    keyboard = {
+                        "inline_keyboard": [
+                            [{"text": "📢 Join Channel", "url": "https://t.me/terabotupdates"}],
+                            [{"text": "✅ Verify", "callback_data": "verify"}]
+                        ]
+                    }
+                    send_message(chat_id, "❌ **You haven't joined yet.** Please join and verify.", keyboard)
+
         return "ok", 200
+
     except Exception as e:
         logging.error(f"Webhook error: {e}")
         return "error", 500
 
+# ---------- Home ----------
 @app.route("/")
 def home():
     return "🤖 Bot is running!", 200
 
-# ---------- Handlers ----------
-bot_app.add_handler(CommandHandler("start", start))
-bot_app.add_handler(CallbackQueryHandler(verify, pattern="verify"))
-bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_link))
-
 # ---------- Main ----------
 if __name__ == "__main__":
+    # Set webhook
     webhook_url = "https://terabot-final-2.onrender.com/webhook"
     try:
-        resp = requests.get(f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook?url={webhook_url}")
+        resp = requests.get(
+            f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook?url={webhook_url}",
+            timeout=10
+        )
         logging.info(f"Webhook set: {resp.json()}")
     except Exception as e:
         logging.error(f"Webhook set error: {e}")
-    
+
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
