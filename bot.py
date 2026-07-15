@@ -27,21 +27,21 @@ async def start(update, context):
         [InlineKeyboardButton("✅ Verify", callback_data="verify")]
     ]
     await update.message.reply_text(
-        "🙏 **Welcome! Please join our channel & press Verify.**",
+        "🙏 **Welcome! Join channel & press Verify.**",
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode=ParseMode.MARKDOWN
     )
 
-# ---------- Verify Callback ----------
+# ---------- Verify ----------
 async def verify(update, context):
     query = update.callback_query
     await query.answer()
     user_id = query.from_user.id
     if await is_user_joined(user_id):
-        await query.edit_message_text("✅ **Verified!** Send me a Terabox link.", parse_mode=ParseMode.MARKDOWN)
+        await query.edit_message_text("✅ **Verified!** Send Terabox link.", parse_mode=ParseMode.MARKDOWN)
     else:
         await query.edit_message_text(
-            "❌ **Not joined yet.** Join & Verify again.",
+            "❌ **Not joined.** Join & Verify again.",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("📢 Join", url="https://t.me/terabotupdates")],
                 [InlineKeyboardButton("✅ Verify", callback_data="verify")]
@@ -53,17 +53,17 @@ async def verify(update, context):
 async def handle_link(update, context):
     user_id = update.effective_user.id
     if not await is_user_joined(user_id):
-        await update.message.reply_text("❌ Please join the channel first.")
+        await update.message.reply_text("❌ Join channel first.")
         return
 
     link = update.message.text
     if "terabox" not in link.lower():
-        await update.message.reply_text("❌ Send a valid Terabox link.")
+        await update.message.reply_text("❌ Send Terabox link.")
         return
 
-    await update.message.reply_text("⏳ Processing your video... (Feature coming soon)")
+    await update.message.reply_text("⏳ Processing... (Video download coming soon)")
 
-# ---------- Flask Webhook ----------
+# ---------- Webhook ----------
 @app.route("/webhook", methods=["POST"])
 def webhook():
     try:
@@ -78,7 +78,7 @@ def webhook():
 def home():
     return "🤖 Bot is running!", 200
 
-# ---------- Register Handlers ----------
+# ---------- Handlers ----------
 bot_app.add_handler(CommandHandler("start", start))
 bot_app.add_handler(CallbackQueryHandler(verify, pattern="verify"))
 bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_link))
