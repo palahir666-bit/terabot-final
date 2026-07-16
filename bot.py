@@ -1,32 +1,52 @@
-import os, logging, requests, re, tempfile, asyncio
+import os, logging, requests, re, tempfile, time, json
 from flask import Flask, request
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters
-from telegram.constants import ParseMode
 
 BOT_TOKEN = "8785333123:AAEzR0HtOs2lWw-rUqEofq2OZnmtO5qg23Q"
 CHANNEL_ID = -1004441957969
 
 app = Flask(__name__)
-bot_app = None
-temp_files = {}
 logging.basicConfig(level=logging.INFO)
 
-# ---------- INIT BOT ----------
-def init_bot():
-    global bot_app
-    bot_app = Application.builder().token(BOT_TOKEN).build()
-    bot_app.add_handler(CommandHandler("start", start))
-    bot_app.add_handler(CallbackQueryHandler(verify, pattern="verify"))
-    bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_link))
-    return bot_app
+# ---------- SEND MESSAGE ----------
+def send_message(chat_id, text, reply_markup=None):
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": chat_id,
+        "text": text,
+        "parse_mode": "Markdown"
+    }
+    if reply_markup:
+        payload["reply_markup"] = json.dumps(reply_markup)
+    try:
+        requests.post(url, json=payload, timeout=10)
+    except Exception as e:
+        logging.error(f"Send error: {e}")
+
+# ---------- SEND VIDEO ----------
+def send_video(chat_id, file_path, caption):
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendVideo"
+    try:
+        with open(file_path, "rb") as f:
+            files = {"video": f}
+            data = {"chat_id": chat_id, "caption": caption, "parse_mode": "Markdown"}
+            requests.post(url, data=data, files=files, timeout=60)
+    except Exception as e:
+        logging.error(f"Send video error: {e}")
 
 # ---------- CHECK JOIN ----------
-async def is_user_joined(user_id):
+def is_user_joined(user_id):
     try:
-        member = await bot_app.bot.get_chat_member(chat_id=CHANNEL_ID, user_id=user_id)
-        return member.status in ["member", "administrator", "creator"]
-    except:
+        url = f"https://api.telegram.org/bot{BOT_TOKEN}/getChatMember"
+        params = {"chat_id": CHANNEL_ID, "user_id": user_id}
+        resp = requests.get(url, params=params, timeout=10)
+        if resp.status_code == 200:
+            data = resp.json()
+            if data.get("ok"):
+                status = data["result"]["status"]
+                return status in ["member", "administrator", "creator"]
+        return False
+    except Exception as e:
+        logging.error(f"Join check error: {e}")
         return False
 
 # ---------- EXTRACT VIDEO URL ----------
@@ -43,112 +63,126 @@ def extract_video_url(terabox_url):
         if match:
             return match.group(1)
         return None
-    except:
+    except Exception as e:
+        logging.error(f"Extract error: {e}")
         return None
 
-# ---------- /start ----------
-async def start(update, context):
-    keyboard = [
-        [InlineKeyboardButton("📢 Join Channel", url="https://t.me/terabotupdates")],
-        [InlineKeyboardButton("✅ Verify", callback_data="verify")]
-    ]
-    await update.message.reply_text(
-        "🙏 **Welcome! Join channel & press Verify.**",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode=ParseMode.MARKDOWN
-    )
-
-# ---------- VERIFY ----------
-async def verify(update, context):
-    query = update.callback_query
-    await query.answer()
-    user_id = query.from_user.id
-    if await is_user_joined(user_id):
-        await query.edit_message_text("✅ **Verified!** Send Terabox link.", parse_mode=ParseMode.MARKDOWN)
-    else:
-        await query.edit_message_text(
-            "❌ **Not joined.** Join & Verify again.",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("📢 Join", url="https://t.me/terabotupdates")],
-                [InlineKeyboardButton("✅ Verify", callback_data="verify")]
-            ]),
-            parse_mode=ParseMode.MARKDOWN
-        )
-
-# ---------- HANDLE LINK ----------
-async def handle_link(update, context):
-    user_id = update.effective_user.id
-    if not await is_user_joined(user_id):
-        await update.message.reply_text("❌ Join channel first.")
-        return
-
-    link = update.message.text
-    if "terabox" not in link.lower():
-        await update.message.reply_text("❌ Send Terabox link.")
-        return
-
-    msg = await update.message.reply_text("⏳ Extracting video link...")
-    video_url = extract_video_url(link)
-    if not video_url:
-        await msg.edit_text("❌ Extract failed.")
-        return
-
-    await msg.edit_text("📥 Downloading...")
+# ---------- DOWNLOAD VIDEO ----------
+def download_video(video_url):
     try:
         with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp:
             response = requests.get(video_url, stream=True, timeout=60)
             for chunk in response.iter_content(chunk_size=8192):
                 tmp.write(chunk)
-            file_path = tmp.name
-    except:
-        await msg.edit_text("❌ Download failed.")
-        return
-
-    await msg.edit_text("📤 Sending video...")
-    caption = "⚠️ **Delete in 2 min.** Save/Forward."
-    sent_msg = await update.message.reply_video(
-        video=open(file_path, "rb"),
-        caption=caption,
-        parse_mode=ParseMode.MARKDOWN
-    )
-    temp_files[sent_msg.message_id] = file_path
-
-    # Schedule deletion without job_queue
-    asyncio.create_task(delete_video_after(update.effective_chat.id, sent_msg.message_id, file_path, context.bot))
-    await msg.edit_text("✅ Video sent! Auto-delete in 2 min.")
-
-# ---------- DELETE VIDEO ----------
-async def delete_video_after(chat_id, message_id, file_path, bot):
-    await asyncio.sleep(120)
-    temp_files.pop(message_id, None)
-    if os.path.exists(file_path):
-        os.remove(file_path)
-    await bot.send_message(chat_id=chat_id, text="🗑️ Video deleted.")
+            return tmp.name
+    except Exception as e:
+        logging.error(f"Download error: {e}")
+        return None
 
 # ---------- WEBHOOK ----------
 @app.route("/webhook", methods=["POST"])
 def webhook():
     try:
-        update = Update.de_json(request.get_json(force=True), bot_app.bot)
-        bot_app.process_update(update)
+        data = request.get_json(force=True)
+        logging.info(f"Webhook received")
+
+        # ---------- MESSAGE ----------
+        if "message" in data:
+            msg = data["message"]
+            chat_id = msg["chat"]["id"]
+            user_id = msg["from"]["id"]
+            text = msg.get("text", "")
+
+            if text == "/start":
+                keyboard = {
+                    "inline_keyboard": [
+                        [{"text": "📢 Join Channel", "url": "https://t.me/terabotupdates"}],
+                        [{"text": "✅ Verify", "callback_data": "verify"}]
+                    ]
+                }
+                send_message(chat_id, "🙏 **Welcome! Join channel & press Verify.**", keyboard)
+
+            elif "terabox" in text.lower():
+                if not is_user_joined(user_id):
+                    keyboard = {
+                        "inline_keyboard": [
+                            [{"text": "📢 Join Channel", "url": "https://t.me/terabotupdates"}],
+                            [{"text": "✅ Verify", "callback_data": "verify"}]
+                        ]
+                    }
+                    send_message(chat_id, "❌ Please join the channel first.", keyboard)
+                    return "ok", 200
+
+                send_message(chat_id, "⏳ Extracting video link...")
+                video_url = extract_video_url(text)
+                if not video_url:
+                    send_message(chat_id, "❌ Could not extract video. Try another link.")
+                    return "ok", 200
+
+                send_message(chat_id, "📥 Downloading video...")
+                file_path = download_video(video_url)
+                if not file_path:
+                    send_message(chat_id, "❌ Download failed.")
+                    return "ok", 200
+
+                caption = "⚠️ **This video will be deleted in 2 minutes.**\n💾 Save or forward it now."
+                send_video(chat_id, file_path, caption)
+                
+                # Schedule deletion
+                threading.Thread(target=delete_video_after, args=(file_path, chat_id), daemon=True).start()
+                
+                send_message(chat_id, "✅ Video sent! Auto-delete in 2 min.")
+            else:
+                send_message(chat_id, "❌ Send a valid Terabox link.")
+
+        # ---------- CALLBACK QUERY ----------
+        elif "callback_query" in data:
+            query = data["callback_query"]
+            chat_id = query["message"]["chat"]["id"]
+            user_id = query["from"]["id"]
+
+            if query["data"] == "verify":
+                if is_user_joined(user_id):
+                    send_message(chat_id, "✅ **Verified!** Now send me a Terabox link.")
+                else:
+                    keyboard = {
+                        "inline_keyboard": [
+                            [{"text": "📢 Join Channel", "url": "https://t.me/terabotupdates"}],
+                            [{"text": "✅ Verify", "callback_data": "verify"}]
+                        ]
+                    }
+                    send_message(chat_id, "❌ **You haven't joined yet.** Please join and verify.", keyboard)
+
         return "ok", 200
+
     except Exception as e:
         logging.error(f"Webhook error: {e}")
         return "error", 500
 
+# ---------- DELETE VIDEO (Background Thread) ----------
+def delete_video_after(file_path, chat_id):
+    time.sleep(120)
+    if os.path.exists(file_path):
+        os.remove(file_path)
+    send_message(chat_id, "🗑️ Video deleted (2 minutes passed).")
+
+# ---------- HOME ----------
 @app.route("/")
 def home():
     return "🤖 Bot is running!", 200
 
 # ---------- MAIN ----------
 if __name__ == "__main__":
-    bot_app = init_bot()
+    # Set webhook
     webhook_url = "https://terabot-final-5.onrender.com/webhook"
     try:
-        resp = requests.get(f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook?url={webhook_url}")
+        resp = requests.get(
+            f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook?url={webhook_url}",
+            timeout=10
+        )
         logging.info(f"Webhook set: {resp.json()}")
     except Exception as e:
         logging.error(f"Webhook set error: {e}")
-    
+
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
